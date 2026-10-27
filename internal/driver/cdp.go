@@ -2,8 +2,10 @@ package driver
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -35,6 +37,11 @@ func NewCDP(profileDir string) (*CDPDriver, error) {
 	// 上一次运行留下的浏览器仍在运行时,新的 chrome.exe 会把命令转交给已有进程
 	// 然后退出,DevTools 端口永远不会出现。用 PID 文件在各平台统一提前判断
 	if err := checkProfileOwner(profileDir); err != nil {
+		return nil, err
+	}
+	// 上一次任务异常结束时浏览器进程可能还在,新启动的 msedge 会把命令转交给它
+	// 并立刻退出,DevTools 端口永远不会出现。先按配置目录里的调试端口找到并关闭它
+	if err := cleanupStaleBrowser(profileDir); err != nil {
 		return nil, err
 	}
 	// macOS/Linux 上再检查 Chrome 自己的单实例锁,覆盖不是本工具启动的浏览器
@@ -70,16 +77,33 @@ func NewCDP(profileDir string) (*CDPDriver, error) {
 			controlURL, pid, err = launch()
 		}
 	}
+	// 上一次的浏览器窗口还没退干净时,新启动的 msedge 会把命令转交给它,
+	// 然后自己立刻退出,缓冲区里什么都没有。再清一次残留进程后重试一次;
+	// 30 秒超时说明端口始终没出现,重试只会再等 30 秒,直接报错
+	if err != nil && !errors.Is(err, context.DeadlineExceeded) {
+		if cerr := cleanupStaleBrowser(profileDir); cerr == nil {
+			time.Sleep(500 * time.Millisecond)
+			controlURL, pid, err = launch()
+		}
+	}
 	if err != nil {
-		return nil, fmt.Errorf("启动浏览器失败: %w", err)
+		if profileInUse(err) {
+			return nil, fmt.Errorf("启动浏览器失败: 会话目录 %s 仍被浏览器窗口占用,请关闭残留的浏览器窗口后重试", profileDir)
+		}
+		return nil, fmt.Errorf("启动浏览器失败: %w\n"+
+			"如果浏览器进程立刻退出,通常是占用会话目录 %s 的残留窗口还没关闭,请关闭后重试", err, profileDir)
 	}
 	browser := rod.New().ControlURL(controlURL)
 	if err := browser.Connect(); err != nil {
 		browser.Close()
+		if kerr := terminate(pid); kerr != nil {
+			return nil, fmt.Errorf("连接浏览器失败: %w;清理浏览器进程失败: %v", err, kerr)
+		}
 		return nil, fmt.Errorf("连接浏览器失败: %w", err)
 	}
 	if err := saveBrowserPID(profileDir, pid); err != nil {
 		browser.Close()
+		_ = terminate(pid)
 		return nil, err
 	}
 	return &CDPDriver{browser: browser, profileDir: profileDir, pid: pid}, nil
@@ -88,30 +112,41 @@ func NewCDP(profileDir string) (*CDPDriver, error) {
 // Close 关闭浏览器进程,等进程真正退出后清掉 PID 文件,
 // 避免紧接着的新任务与仍在退出的旧进程争用同一份会话目录
 func (d *CDPDriver) Close() error {
-	if err := d.browser.Close(); err != nil {
+	// 用户手动关掉窗口后 CDP 连接已断开,browser.Close 会报错,
+	// 但进程仍必须回收,否则会话目录会被残留进程一直占用
+	_ = d.browser.Close()
+	if err := terminate(d.pid); err != nil {
 		return err
-	}
-	for i := 0; i < 30 && processAlive(d.pid); i++ {
-		time.Sleep(100 * time.Millisecond)
-	}
-	if processAlive(d.pid) {
-		// Browser.close 没有让进程退出(例如后台继续运行设置),直接结束它
-		p, err := os.FindProcess(d.pid)
-		if err != nil {
-			return fmt.Errorf("结束浏览器进程失败: %w", err)
-		}
-		if err := p.Kill(); err != nil {
-			return fmt.Errorf("结束浏览器进程失败: %w", err)
-		}
-		for i := 0; i < 20 && processAlive(d.pid); i++ {
-			time.Sleep(100 * time.Millisecond)
-		}
-	}
-	if processAlive(d.pid) {
-		return fmt.Errorf("浏览器进程(PID %d)未能退出", d.pid)
 	}
 	if err := os.Remove(pidFilePath(d.profileDir)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("删除浏览器 PID 文件失败: %w", err)
+	}
+	return nil
+}
+
+// terminate 等待浏览器进程自行退出,超时后强制结束。
+// 用于 CDP 关闭失败(例如用户已经关掉窗口、连接已断开)后的兜底,
+// 确保会话目录不再被残留进程占用
+func terminate(pid int) error {
+	for i := 0; i < 30 && processAlive(pid); i++ {
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !processAlive(pid) {
+		return nil
+	}
+	// Browser.close 没有让进程退出(例如后台继续运行设置),直接结束它
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return fmt.Errorf("结束浏览器进程失败: %w", err)
+	}
+	if err := p.Kill(); err != nil {
+		return fmt.Errorf("结束浏览器进程失败: %w", err)
+	}
+	for i := 0; i < 20 && processAlive(pid); i++ {
+		time.Sleep(100 * time.Millisecond)
+	}
+	if processAlive(pid) {
+		return fmt.Errorf("浏览器进程(PID %d)未能退出", pid)
 	}
 	return nil
 }
@@ -152,6 +187,77 @@ func saveBrowserPID(profileDir string, pid int) error {
 		return fmt.Errorf("记录浏览器进程号失败: %w", err)
 	}
 	return nil
+}
+
+// profileInUse 判断启动失败是否因为会话目录已被另一个浏览器窗口占用。
+// 中文版 msedge 的提示是 GBK 编码,直接显示会乱码,这里识别后换成可读文案
+func profileInUse(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "\xd5\xfd\xd4\xda\xcf\xd6\xd3\xd0\xe4\xaf\xc0\xc0\xc6\xf7\xbb\xe1\xbb\xb0\xd6\xd0\xb4\xf2\xbf\xaa\xa1\xa3") ||
+		strings.Contains(msg, "Opening in existing browser session")
+}
+
+// devToolsPort 读取配置目录里 DevToolsActivePort 的第一行(调试端口)。
+// 文件不存在或内容异常时返回 0
+func devToolsPort(profileDir string) int {
+	data, err := os.ReadFile(filepath.Join(profileDir, "DevToolsActivePort"))
+	if err != nil {
+		return 0
+	}
+	line, _, _ := strings.Cut(string(data), "\n")
+	port, err := strconv.Atoi(strings.TrimSpace(line))
+	if err != nil || port <= 0 || port > 65535 {
+		return 0
+	}
+	return port
+}
+
+// devToolsWS 询问调试端口对应的 WebSocket 地址;
+// 浏览器已经退出或端口不可用时返回 false
+func devToolsWS(port int) (string, bool) {
+	client := http.Client{Timeout: 2 * time.Second}
+	res, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/json/version", port))
+	if err != nil {
+		return "", false
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return "", false
+	}
+	var info struct {
+		WS string `json:"webSocketDebuggerUrl"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&info); err != nil || info.WS == "" {
+		return "", false
+	}
+	return info.WS, true
+}
+
+// cleanupStaleBrowser 关闭仍占用会话目录的浏览器。
+// 上次任务异常结束(控制台被关闭、进程被强杀)时浏览器窗口会留在后台,
+// 之后新启动的 msedge 会把命令转交给它并立即退出,DevTools 端口永远不会出现。
+// 只使用配置目录里记录的调试端口,不会误关用户自己的其他浏览器窗口
+func cleanupStaleBrowser(profileDir string) error {
+	port := devToolsPort(profileDir)
+	if port == 0 {
+		return nil
+	}
+	ws, ok := devToolsWS(port)
+	if !ok {
+		return nil // DevToolsActivePort 只是上次运行留下的残留文件
+	}
+	b := rod.New().ControlURL(ws)
+	if err := b.Connect(); err != nil {
+		return nil
+	}
+	_ = b.Close()
+	for i := 0; i < 50; i++ {
+		if _, ok := devToolsWS(port); !ok {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return fmt.Errorf("会话目录 %s 仍被浏览器占用(调试端口 %d),请手动关闭残留的浏览器窗口后重试", profileDir, port)
 }
 
 var errNoLockFile = errors.New("无残留锁文件")

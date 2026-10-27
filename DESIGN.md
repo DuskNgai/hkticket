@@ -49,9 +49,9 @@ BringToFront()   置前窗口并激活标签页
 - 内置候选表按 Chrome → Chromium → Edge 的固定顺序探测(Chrome 优先)，均未命中时回退 `launcher.LookPath()`
 - `--user-data-dir` 指向持久化会话目录(第 1 个会话沿用 `browser-profile/`，其余为 `browser-profile-2/`、`-3/`…)，人机验证 Cookie 跨运行保留；各目录 Cookie 互不可见，排队系统把每个实例当作独立身份
 - 启动参数去掉 go-rod 默认的 `--enable-automation`，并加 `--disable-blink-features=AutomationControlled`，避免 `navigator.webdriver` 为 true 让 reCAPTCHA Enterprise 反复要求验证
-- 每个会话目录同一时刻只允许一个浏览器实例使用:启动后在目录里记录浏览器 PID，下次启动先检查该进程是否存活，占用时立即报错提示先关闭已有窗口；macOS/Linux 另外检查 Chrome 的 SingletonLock。启动过程带 30 秒超时，避免 DevTools 端口迟迟不出现时无限等待
+- 每个会话目录同一时刻只允许一个浏览器实例使用:启动后在目录里记录浏览器 PID，下次启动先检查该进程是否存活，占用时立即报错提示先关闭已有窗口；进程被强杀、PID 文件缺失时，再读目录里的 `DevToolsActivePort` 找到残留浏览器并通过 CDP 关掉，避免新版 `msedge` 把启动命令转交给旧窗口后自己退出；macOS/Linux 另外检查 Chrome 的 SingletonLock。启动过程带 30 秒超时，避免 DevTools 端口迟迟不出现时无限等待
 - 不拦截页面资源，图片、字体、音视频与脚本正常加载，保证排队后进入购票页面时元素完整显示
-- 拿到排队位或出现过人机验证时保留浏览器窗口，由用户继续操作；停止、启动阶段出错、超时且无人机验证时调用 `Close()` 关闭窗口，释放会话目录
+- 拿到排队位或出现过人机验证时保留浏览器窗口，由用户继续操作；停止、启动阶段出错、超时且无人机验证时调用 `Close()` 关闭窗口，释放会话目录；即使 CDP 连接已经断开(用户手动关了窗口)，也会等待并强制结束进程
 - 因此关闭 go-rod 的 leakless(同时避免 Windows Defender 误报 `leakless.exe` 为病毒)
 
 驱动选择:`--driver auto` 时 macOS → safari，其余平台 → cdp；自动模式下会话数大于 1 直接改用 cdp(Safari 全系统共享 Cookie，多会话拿到的仍是同一个排队号，显式指定 safari 才报错)。`driver.NewN(name， count)` 一次创建 count 个相互独立的驱动。
