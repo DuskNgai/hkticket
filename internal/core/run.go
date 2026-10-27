@@ -5,8 +5,8 @@ import (
 	"math"
 	"time"
 
-	"rush/internal/clock"
-	"rush/internal/driver"
+	"hkticket/internal/clock"
+	"hkticket/internal/driver"
 )
 
 var ntpServers = []string{"ntp.aliyun.com", "ntp.tencent.com", "ntp.ntsc.ac.cn", "time.apple.com"}

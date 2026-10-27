@@ -14,9 +14,9 @@ import (
 	"strings"
 	"sync"
 
-	"rush/internal/core"
-	"rush/internal/driver"
-	"rush/internal/settings"
+	"hkticket/internal/core"
+	"hkticket/internal/driver"
+	"hkticket/internal/settings"
 )
 
 //go:embed index.html
@@ -323,7 +323,7 @@ func Run() error {
 	mux.HandleFunc("/api/sites", handleSites)
 
 	addr := "http://" + listener.Addr().String()
-	fmt.Println("Rush 控制台:", addr)
+	fmt.Println("HKTicket 控制台:", addr)
 	fmt.Println("关闭此窗口即可退出程序")
 	openBrowser(addr)
 	return http.Serve(listener, mux)

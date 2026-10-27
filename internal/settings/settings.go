@@ -9,7 +9,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"rush/internal/paths"
+	"hkticket/internal/paths"
 )
 
 type Settings struct {

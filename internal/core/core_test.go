@@ -1,10 +1,12 @@
 package core
 
 import (
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
-	"rush/internal/driver"
+	"hkticket/internal/driver"
 )
 
 func TestCheckHit(t *testing.T) {
@@ -100,7 +102,8 @@ func TestExtractQueueNumber(t *testing.T) {
 }
 
 func TestButtonHintRE(t *testing.T) {
-	hits := []string{"整理页面", "進入", "进入队列", "加入等候", "前往", "enter now", "Join the queue"}
+	hits := []string{"整理页面", "進入", "进入队列", "加入等候", "前往", "enter now", "Join the queue",
+		"重新整理", "Refresh", "please refresh at that time", "Reload"}
 	for _, s := range hits {
 		if !ButtonHintRE.MatchString(s) {
 			t.Errorf("%q 应命中入口按钮特征", s)
@@ -170,5 +173,163 @@ func TestParseTargetTime(t *testing.T) {
 func TestClickButtonJSNoBackslash(t *testing.T) {
 	if strings.Contains(driver.ClickButtonJS, `\`) {
 		t.Error("ClickButtonJS 不允许包含反斜杠")
+	}
+}
+
+func TestRefreshHintRE(t *testing.T) {
+	for _, s := range []string{"重新整理", "Refresh", "刷新", "Reload"} {
+		if !RefreshHintRE.MatchString(s) {
+			t.Errorf("%q 应判定为重新整理按钮", s)
+		}
+	}
+	for _, s := range []string{"进入网站", "進入網站", "Enter", "Queue Again", "重新排队"} {
+		if RefreshHintRE.MatchString(s) {
+			t.Errorf("%q 不应判定为重新整理按钮", s)
+		}
+	}
+}
+
+// fakeDriver 用固定内容序列驱动 Monitor,并记录按钮点击次数
+type fakeDriver struct {
+	contents  []string
+	idx       int
+	clickText string
+	clicks    int
+	reloads   int
+	stop      chan struct{}
+	stopAfter int
+	gets      int
+}
+
+func (f *fakeDriver) OpenTabs(string) error { return nil }
+
+func (f *fakeDriver) GetContent() (string, error) {
+	c := f.contents[f.idx]
+	if f.idx < len(f.contents)-1 {
+		f.idx++
+	}
+	f.gets++
+	if f.stop != nil && f.stopAfter > 0 && f.gets == f.stopAfter {
+		close(f.stop)
+	}
+	return c, nil
+}
+
+func (f *fakeDriver) ClickEntry() (string, error) { f.clicks++; return f.clickText, nil }
+func (f *fakeDriver) Reload() error               { f.reloads++; return nil }
+func (f *fakeDriver) BringToFront() error         { return nil }
+func (f *fakeDriver) Close() error                { return nil }
+
+func newTestMonitor(f *fakeDriver) (int, bool, error) {
+	target := time.Now()
+	return Monitor([]driver.Driver{f}, Config{IntervalMs: 100, TimeoutSec: 60, Sessions: 1},
+		target, target.Add(time.Minute), time.Now, func(string) {}, f.stop)
+}
+
+// 等候室的「重新整理」点一次只重查一次状态,必须每轮都点
+func TestMonitorRepeatsRefreshClick(t *testing.T) {
+	stop := make(chan struct{})
+	d := &fakeDriver{
+		contents:  []string{"Coming soon... Countdown 重新整理"},
+		clickText: "重新整理",
+		stop:      stop,
+		stopAfter: 4,
+	}
+	_, _, err := newTestMonitor(d)
+	if !errors.Is(err, ErrStopped) {
+		t.Fatalf("应因停止信号结束,得到 %v", err)
+	}
+	if d.clicks < 3 {
+		t.Errorf("「重新整理」应每轮重复点击,实际只点了 %d 次", d.clicks)
+	}
+}
+
+// 真正的入口按钮只点一次,之后不再重复点击
+func TestMonitorClicksEntryOnce(t *testing.T) {
+	stop := make(chan struct{})
+	d := &fakeDriver{
+		contents:  []string{"进入网站"},
+		clickText: "进入网站",
+		stop:      stop,
+		stopAfter: 4,
+	}
+	_, _, err := newTestMonitor(d)
+	if !errors.Is(err, ErrStopped) {
+		t.Fatalf("应因停止信号结束,得到 %v", err)
+	}
+	if d.clicks != 1 {
+		t.Errorf("入口按钮应只点一次,实际点了 %d 次", d.clicks)
+	}
+}
+
+// 连续点击「重新整理」-> 页面切换成排队页 -> 命中
+func TestMonitorRefreshThenHit(t *testing.T) {
+	d := &fakeDriver{
+		contents: []string{
+			"重新整理",
+			"重新整理",
+			"You are now in line! Number of Users Ahead of You: 5",
+		},
+		clickText: "重新整理",
+		stop:      make(chan struct{}),
+	}
+	hits, _, err := newTestMonitor(d)
+	if err != nil {
+		t.Fatalf("不应报错: %v", err)
+	}
+	if hits != 1 {
+		t.Fatalf("应命中 1 个会话,得到 %d", hits)
+	}
+	if d.clicks != 2 {
+		t.Errorf("命中前应点过 2 次「重新整理」,实际 %d 次", d.clicks)
+	}
+}
+
+// 普通网站(没有「重新整理」按钮)到点后不会自己更新,应主动重载
+func TestMonitorReloadsAfterTarget(t *testing.T) {
+	stop := make(chan struct{})
+	d := &fakeDriver{
+		contents:  []string{"Coming soon... 活动尚未开始"},
+		stop:      stop,
+		stopAfter: 6,
+	}
+	target := time.Now()
+	clock := target.Add(-2 * time.Second)
+	now := func() time.Time {
+		clock = clock.Add(300 * time.Millisecond)
+		return clock
+	}
+	_, _, err := Monitor([]driver.Driver{d}, Config{IntervalMs: 100, TimeoutSec: 60, Sessions: 1},
+		target, target.Add(time.Minute), now, func(string) {}, stop)
+	if !errors.Is(err, ErrStopped) {
+		t.Fatalf("应因停止信号结束,得到 %v", err)
+	}
+	if d.reloads < 1 {
+		t.Errorf("到点后应主动重载页面,实际重载 %d 次", d.reloads)
+	}
+}
+
+// 出现过「重新整理」按钮的 PleaseQ 页面不能主动重载,否则会打断排队
+func TestMonitorNoReloadAfterRefreshButton(t *testing.T) {
+	stop := make(chan struct{})
+	d := &fakeDriver{
+		contents:  []string{"Coming soon... 重新整理", "Loading..."},
+		clickText: "重新整理",
+		stop:      stop,
+		stopAfter: 6,
+	}
+	target := time.Now()
+	clock := target.Add(-2 * time.Second)
+	now := func() time.Time {
+		clock = clock.Add(300 * time.Millisecond)
+		return clock
+	}
+	_, _, err := Monitor([]driver.Driver{d}, Config{IntervalMs: 100, TimeoutSec: 60, Sessions: 1},
+		target, target.Add(time.Minute), now, func(string) {}, stop)
+	if !errors.Is(err, ErrStopped) {
+		t.Fatalf("应因停止信号结束,得到 %v", err)
+	}
+	if d.reloads != 0 {
+		t.Errorf("PleaseQ 页面不应主动重载,实际重载 %d 次", d.reloads)
 	}
 }

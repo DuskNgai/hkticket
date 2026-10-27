@@ -1,4 +1,4 @@
-# Rush 定点抢号工具
+# HKTicket 定点抢号工具
 
 在指定时刻自动监视排队页面，入口按钮出现时自动点击，拿到排队位后提醒。
 
@@ -13,10 +13,10 @@
 
 `dist/` 目录提供三个操作系统(共四个文件)的单文件可执行程序，无需安装任何运行时：
 
-- `rush-macos-arm64` — macOS(Apple 芯片)
-- `rush-macos-intel` — macOS(Intel)
-- `rush-windows.exe` — Windows
-- `rush-linux` — Linux
+- `hkticket-macos-arm64` — macOS(Apple 芯片)
+- `hkticket-macos-intel` — macOS(Intel)
+- `hkticket-windows.exe` — Windows
+- `hkticket-linux` — Linux
 
 ## 使用
 
@@ -27,7 +27,7 @@
 ### 命令行
 
 ```bash
-./rush-macos-arm64 --site hcfc --time "2026-01-01 10：00：00"
+./hkticket-macos-arm64 --site hcfc --time "2026-01-01 10：00：00"
 ```
 
 时间按香港时区理解，与电脑所在时区无关。参数：
@@ -35,9 +35,9 @@
 - `--site` 目标网站：`hcfc`(HCFC 歌迷会)/ `custom`(自定义);省略时使用上次保存的值
 - `--url` 自定义入口地址，仅配合 `--site custom` 使用
 - `--time` 目标时间，格式 `YYYY-MM-DD HH：MM：SS`;省略时使用上次保存的值
-- `--lead` 提前开始监视的秒数，默认 10(入口按钮约在倒数 10–5 秒出现，默认覆盖整个窗口期)
+- `--lead` 提前开始监视的秒数，默认 15(入口按钮约在倒数 10–5 秒出现，默认覆盖整个窗口期)
 - `--sessions` 独立会话数量(1–10)，默认 3;每个会话一个独立浏览器实例，各排一个号
-- `--interval` 页面检查间隔(毫秒，最小 100)，默认 500
+- `--interval` 页面检查间隔(毫秒，最小 100)，默认 200
 - `--timeout` 开售后多少秒仍未命中则放弃，默认 15
 - `--driver` 浏览器驱动：`auto` / `safari` / `cdp`，默认 `auto`
 
@@ -79,7 +79,7 @@
 需要 Go 1.27.3 及以上：
 
 ```bash
-cd rush
+cd hkticket
 go mod tidy
 bash build.sh   # 一次产出全部四个平台到 dist/
 ```

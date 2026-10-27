@@ -45,8 +45,14 @@ func NeedsVerification(content string) bool {
 }
 
 // 入口按钮特征:开售前几秒 PleaseQ 会把等候室换成必须点击的按钮。
+// 英文 Refresh/Reload 是开售前 5 秒出现的「重新整理」按钮,点击会立即重查排队状态,
+// 开售瞬间需要连续点击(见 Monitor)。
 // \b 防止英文单词被子串误伤(例如 "Entertainment" 里的 "enter")
-var ButtonHintRE = regexp.MustCompile(`(?i)整理|進入|进入|加入|前往|\benter\b|\bjoin\b`)
+var ButtonHintRE = regexp.MustCompile(`(?i)整理|進入|进入|加入|前往|\benter\b|\bjoin\b|\brefresh\b|\breload\b`)
+
+// RefreshHintRE 判断点中的按钮是否「重新整理」类。这类按钮点一次只触发一次状态查询,
+// 不是真正的入口;Monitor 会对它每轮重复点击,而不是像入口按钮那样只点一次
+var RefreshHintRE = regexp.MustCompile(`(?i)重新整理|刷新|refresh|reload`)
 
 var queueNumberPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)Number of Users Ahead of You[:\s]*(\d+)`),

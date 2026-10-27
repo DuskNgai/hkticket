@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"os"
 
-	"rush/internal/core"
-	"rush/internal/driver"
-	"rush/internal/settings"
-	"rush/internal/webui"
+	"hkticket/internal/core"
+	"hkticket/internal/driver"
+	"hkticket/internal/settings"
+	"hkticket/internal/webui"
 )
 
 func main() {
@@ -49,7 +49,7 @@ func main() {
 		defDriver = saved.Driver
 	}
 
-	fs := flag.NewFlagSet("rush", flag.ExitOnError)
+	fs := flag.NewFlagSet("hkticket", flag.ExitOnError)
 	site := fs.String("site", defSite, "目标网站:hcfc(HCFC 歌迷会)/ custom(自定义,配合 --url)")
 	urlStr := fs.String("url", saved.URL, "自定义入口地址(仅 --site custom 时使用;上次输入会自动填入)")
 	timeStr := fs.String("time", saved.Time, "目标时间 YYYY-MM-DD HH:MM:SS(香港时区;上次输入会自动填入)")

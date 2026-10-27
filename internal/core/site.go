@@ -15,7 +15,7 @@ type Site struct {
 
 // Sites 支持的网站,顺序即界面选项顺序
 var Sites = []Site{
-	{"hcfc", "HCFC 歌迷会", "https://vwr.hinscheung.com/?page_id=hins-1698981622&redirect_to=https://hinscheung.com/"},
+	{"hcfc", "HCFC 歌迷会", "https://vwr.hinscheung.com/?page_id=hins-1698981622&redirect_to=https%3A%2F%2Fhinscheung.com%2F"},
 }
 
 // FindSite 按标识查找网站

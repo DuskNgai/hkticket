@@ -6,7 +6,7 @@ import (
 	"math/rand"
 	"time"
 
-	"rush/internal/driver"
+	"hkticket/internal/driver"
 )
 
 // ErrStopped 表示任务被停止信号中断,调用方应把它当作正常停止处理
@@ -62,7 +62,10 @@ func ValidateConfig(cfg Config) error {
 	return nil
 }
 
-const reloadBackoff = 5 * time.Second
+const (
+	reloadBackoff          = 5 * time.Second
+	proactiveReloadBackoff = time.Second
+)
 
 // Monitor 监视各会话的标签页直到出现排队页或超时,返回命中的会话数,
 // 以及是否出现过需要人工处理的人机验证页。
@@ -81,6 +84,8 @@ func Monitor(ds []driver.Driver, cfg Config, target, timeout time.Time, now func
 	lastReload := map[int]time.Time{} // 每个会话上次恢复性重载的时刻
 	verifyNotified := map[int]bool{}  // 已提示过人机验证的会话
 	verifyCount := map[int]int{}      // 每个会话出现人机验证的次数
+	refreshLogged := map[int]bool{}   // 已提示过「重新整理」按钮的会话
+	refreshSeen := map[int]bool{}     // 出现过「重新整理」按钮的会话,属于 PleaseQ 类页面
 	manual = false                    // 是否出现过需要人工处理的验证页
 
 	for now().Before(timeout) {
@@ -144,8 +149,19 @@ func Monitor(ds []driver.Driver, cfg Config, target, timeout time.Time, now func
 				if err != nil {
 					Logf(logf, "[S%d] 点击入口按钮失败: %v", s+1, err)
 				} else if clicked != "" {
-					entered[s] = true
-					Logf(logf, "[S%d] 检测到入口按钮,已自动点击: %q", s+1, clicked)
+					// 「重新整理」在开售前 5 秒出现,点一次只重查一次排队状态。
+					// 记为已进入会导致之后只点一次、错过开售瞬间,所以每轮都点,
+					// 直到页面切出排队页或出现真正的入口按钮
+					if RefreshHintRE.MatchString(clicked) {
+						refreshSeen[s] = true
+						if !refreshLogged[s] {
+							refreshLogged[s] = true
+							Logf(logf, "[S%d] 检测到「%s」按钮,开始连续点击", s+1, clicked)
+						}
+					} else {
+						entered[s] = true
+						Logf(logf, "[S%d] 检测到入口按钮,已自动点击: %q", s+1, clicked)
+					}
 					continue
 				}
 			}
@@ -164,6 +180,21 @@ func Monitor(ds []driver.Driver, cfg Config, target, timeout time.Time, now func
 					return len(hit), manual, nil
 				}
 				continue
+			}
+
+			// 开售后兜底:没有出现「重新整理」按钮的页面(非 PleaseQ)通常不会自己更新,
+			// 到点后必须主动重载才能刷出购票入口,第一个到点的轮询就重载,之后每秒重试;
+			// PleaseQ 由上面的连续点击推进,重载会打断它,所以用 refreshSeen 排除。
+			// 空白内容通常是重载后的导航过渡,跳过这里、交给下面错误页重载的 5 秒退避,
+			// 否则每秒一次的重载会不断打断页面加载
+			if !entered[s] && !refreshSeen[s] && content != "" && !now().Before(target) &&
+				time.Since(lastReload[s]) >= proactiveReloadBackoff {
+				lastReload[s] = time.Now()
+				if err := d.Reload(); err != nil {
+					Logf(logf, "[S%d] 到点重载失败: %v", s+1, err)
+				} else {
+					Logf(logf, "[S%d] 到点未见更新,已重载页面", s+1)
+				}
 			}
 
 			// 恢复性重载:页面空白或服务器错误,且距上次重载超过退避时间

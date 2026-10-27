@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"runtime"
 
-	"rush/internal/paths"
+	"hkticket/internal/paths"
 )
 
 // DefaultName 返回当前平台的默认驱动名:macOS 用 Safari,其余平台用 CDP

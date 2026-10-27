@@ -21,8 +21,8 @@ type Driver interface {
 
 // ClickButtonJS 在页面里查找并点击排队入口按钮,返回按钮文本。
 // 英文部分不用 \b:该脚本会被嵌进 AppleScript 双引号字符串,反斜杠会被吃掉,
-// 因此用 ^(join|enter|proceed|continue)( |$) 做整词约束
-const ClickButtonJS = `(function(){var els=document.querySelectorAll('button,a,input[type=button],input[type=submit]');for(var i=0;i<els.length;i++){var t=(els[i].innerText||els[i].value||'').trim();if(/整理|進入|进入|加入|前往/i.test(t)||/^(join|enter|proceed|continue)( |$)/i.test(t)){els[i].click();return t;}}return '';})()`
+// 因此用 ^(join|enter|proceed|continue|refresh|reload)( |$) 做整词约束
+const ClickButtonJS = `(function(){var els=document.querySelectorAll('button,a,input[type=button],input[type=submit]');for(var i=0;i<els.length;i++){var t=(els[i].innerText||els[i].value||'').trim();if(/整理|進入|进入|加入|前往/i.test(t)||/^(join|enter|proceed|continue|refresh|reload)( |$)/i.test(t)){els[i].click();return t;}}return '';})()`
 
 // GetContentJS 取 React 根节点(或 body)的可见文本
 const GetContentJS = `document.getElementById('root') ? document.getElementById('root').innerText : document.body.innerText`

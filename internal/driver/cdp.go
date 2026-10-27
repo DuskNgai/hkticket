@@ -117,7 +117,7 @@ func (d *CDPDriver) Close() error {
 }
 
 func pidFilePath(profileDir string) string {
-	return filepath.Join(profileDir, ".rush-browser.pid")
+	return filepath.Join(profileDir, ".hkticket-browser.pid")
 }
 
 // checkProfileOwner 用 PID 文件判断上一次启动的浏览器是否仍在运行。
