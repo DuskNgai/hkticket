@@ -1,0 +1,217 @@
+package core
+
+import (
+	"errors"
+	"fmt"
+	"math/rand"
+	"time"
+
+	"rush/internal/driver"
+)
+
+// ErrStopped 表示任务被停止信号中断,调用方应把它当作正常停止处理
+var ErrStopped = errors.New("任务已被停止")
+
+// 默认参数,命令行与图形控制台共用
+const (
+	DefaultLeadSec    = 10
+	DefaultIntervalMs = 500
+	DefaultTimeoutSec = 15
+	DefaultSessions   = 3
+	// MaxSessions 会话数上限;每个会话是一个完整浏览器进程,过多会拖垮机器
+	MaxSessions = 10
+)
+
+// Config 是一次抢号任务的全部参数
+type Config struct {
+	Site       string // 网站标识,见 Sites;custom 表示自定义地址
+	URL        string // 自定义入口地址,仅 Site 为 custom 时使用
+	Time       string // "YYYY-MM-DD HH:MM:SS",按香港时区
+	Lead       int    // 提前开始监视的秒数
+	Sessions   int    // 独立会话数量;每个会话一个浏览器实例、一份 Cookie,各排一个号
+	IntervalMs int    // 页面检查间隔毫秒数
+	TimeoutSec int    // 开售后多少秒仍未命中则放弃
+}
+
+// ValidateSessions 校验会话数范围
+func ValidateSessions(n int) error {
+	if n < 1 || n > MaxSessions {
+		return fmt.Errorf("会话数应在 1 到 %d 之间: %d", MaxSessions, n)
+	}
+	return nil
+}
+
+// ValidateConfig 校验任务参数。间隔过小会造成忙循环反复读取页面,
+// 超时为 0 或负数会让监视一开始就结束,均在启动前拦下
+func ValidateConfig(cfg Config) error {
+	if _, err := ParseTargetTime(cfg.Time); err != nil {
+		return err
+	}
+	if err := ValidateSessions(cfg.Sessions); err != nil {
+		return err
+	}
+	if cfg.Lead < 0 {
+		return fmt.Errorf("提前秒数不能为负: %d", cfg.Lead)
+	}
+	if cfg.IntervalMs < 100 {
+		return fmt.Errorf("检查间隔应不小于 100 毫秒: %d", cfg.IntervalMs)
+	}
+	if cfg.TimeoutSec < 1 {
+		return fmt.Errorf("超时时间应不小于 1 秒: %d", cfg.TimeoutSec)
+	}
+	return nil
+}
+
+const reloadBackoff = 5 * time.Second
+
+// Monitor 监视各会话的标签页直到出现排队页或超时,返回命中的会话数,
+// 以及是否出现过需要人工处理的人机验证页。
+// 每个会话一个独立浏览器实例(标签页固定 1 个),命中后继续监视其余会话,
+// 全部命中或超时才结束。
+//
+// 策略(来自 2026-09-12 实测):PleaseQ 页面是自动更新的单页应用,
+// 等候室会自行切换成入口按钮,持续刷新只会中断应用启动,还会抹掉入口按钮。
+// 因此:轮询内容、按钮出现即点击,只有页面出错才恢复性重载。
+func Monitor(ds []driver.Driver, cfg Config, target, timeout time.Time, now func() time.Time, logf func(string), stop <-chan struct{}) (hits int, manual bool, err error) {
+	attempt := 0
+	var lastS1 string
+	lastS1Set := false
+	entered := map[int]bool{}         // 已点击过入口按钮的会话,之后不再重载
+	hit := map[int]bool{}             // 已拿到排队位的会话,之后不再轮询
+	lastReload := map[int]time.Time{} // 每个会话上次恢复性重载的时刻
+	verifyNotified := map[int]bool{}  // 已提示过人机验证的会话
+	verifyCount := map[int]int{}      // 每个会话出现人机验证的次数
+	manual = false                    // 是否出现过需要人工处理的验证页
+
+	for now().Before(timeout) {
+		if err := checkStop(stop); err != nil {
+			return len(hit), manual, err
+		}
+		attempt++
+		loopStart := time.Now()
+		Logf(logf, "第 %d 轮", attempt)
+
+		for s, d := range ds {
+			if hit[s] {
+				continue
+			}
+			if !now().Before(timeout) {
+				return len(hit), manual, nil
+			}
+			if err := checkStop(stop); err != nil {
+				return len(hit), manual, err
+			}
+
+			content, err := d.GetContent()
+			if err != nil {
+				Logf(logf, "[S%d] 读取页面失败: %v", s+1, err)
+				continue
+			}
+
+			// 诊断:1 号会话内容变化时打印前 60 个字符
+			if s == 0 && (!lastS1Set || content != lastS1) {
+				snippet := []rune(content)
+				if len(snippet) > 60 {
+					snippet = snippet[:60]
+				}
+				Logf(logf, "[S1] 页面内容: %q", string(snippet))
+				lastS1 = content
+				lastS1Set = true
+			}
+
+			// 人机验证需要用户在浏览器里手动完成,工具只负责把窗口置前并提示
+			if NeedsVerification(content) {
+				manual = true
+				if !verifyNotified[s] {
+					verifyNotified[s] = true
+					verifyCount[s]++
+					Logf(logf, "[S%d] 页面要求人机验证,请在对应浏览器窗口点击「我不是机器人」", s+1)
+					if err := d.BringToFront(); err != nil {
+						Logf(logf, "[S%d] 置前窗口失败: %v", s+1, err)
+					}
+					if verifyCount[s] == 3 {
+						Logf(logf, "[S%d] 人机验证反复出现,通常是系统时间偏差过大或 recaptcha.net 网络不通", s+1)
+					}
+				}
+				continue
+			}
+			// 验证页消失后重置,下次再出现时重新提示
+			verifyNotified[s] = false
+
+			// 入口按钮一出现就点击;本轮内容是在点击前读取的,跳过命中检查
+			if !entered[s] && ButtonHintRE.MatchString(content) {
+				clicked, err := d.ClickEntry()
+				if err != nil {
+					Logf(logf, "[S%d] 点击入口按钮失败: %v", s+1, err)
+				} else if clicked != "" {
+					entered[s] = true
+					Logf(logf, "[S%d] 检测到入口按钮,已自动点击: %q", s+1, clicked)
+					continue
+				}
+			}
+
+			if CheckHit(content) {
+				delta := now().Sub(target).Seconds()
+				Logf(logf, "[S%d] 命中!距开售 %+.3f 秒", s+1, delta)
+				if n, ok := ExtractQueueNumber(content); ok {
+					Logf(logf, "[S%d] 排队编号:前面还有 %d 人", s+1, n)
+				}
+				if err := d.BringToFront(); err != nil {
+					Logf(logf, "[S%d] 置前窗口失败: %v", s+1, err)
+				}
+				hit[s] = true
+				if len(hit) == len(ds) {
+					return len(hit), manual, nil
+				}
+				continue
+			}
+
+			// 恢复性重载:页面空白或服务器错误,且距上次重载超过退避时间
+			if !entered[s] && IsErrorPage(content) {
+				if time.Since(lastReload[s]) >= reloadBackoff {
+					// 失败也要记时间,否则每轮都会重试,退避形同虚设
+					lastReload[s] = time.Now()
+					if err := d.Reload(); err != nil {
+						Logf(logf, "[S%d] 重载失败: %v", s+1, err)
+					} else {
+						Logf(logf, "[S%d] 页面异常,已重载", s+1)
+					}
+				}
+			}
+		}
+
+		// 间隔扣除本轮耗时,加 ±20% 抖动
+		remaining := time.Duration(cfg.IntervalMs)*time.Millisecond - time.Since(loopStart)
+		if remaining > 0 {
+			// 注意先把比例换算成具体时长再转 Duration:time.Duration(0.1) 会截断成 0
+			jitter := time.Duration((rand.Float64()*0.4 - 0.2) * float64(remaining))
+			if err := sleepFor(remaining+jitter, stop); err != nil {
+				return len(hit), manual, err
+			}
+		}
+	}
+	return len(hit), manual, nil
+}
+
+func checkStop(stop <-chan struct{}) error {
+	select {
+	case <-stop:
+		return ErrStopped
+	default:
+		return nil
+	}
+}
+
+func sleepFor(d time.Duration, stop <-chan struct{}) error {
+	if d <= 0 {
+		return checkStop(stop)
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-stop:
+		return ErrStopped
+	case <-timer.C:
+		return nil
+	}
+}

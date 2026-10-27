@@ -1,0 +1,28 @@
+// Package driver 抽象浏览器控制。一个驱动实例对应一个浏览器窗口,
+// 窗口内固定 1 个标签页;多会话靠多个驱动实例实现
+package driver
+
+// Driver 是浏览器控制接口。各方法把错误原样返回,由调用方决定中止或下一轮重试。
+type Driver interface {
+	// OpenTabs 新开一个窗口并打开目标 URL
+	OpenTabs(url string) error
+	// GetContent 返回页面 #root(或 body)的 innerText;
+	// 页面正在导航等过渡状态下内容不可得,返回空字符串与 nil
+	GetContent() (string, error)
+	// ClickEntry 点击排队入口按钮,返回按钮文本;没有按钮时返回空字符串与 nil
+	ClickEntry() (string, error)
+	// Reload 重新导航到目标 URL(仅用于出错恢复)
+	Reload() error
+	// BringToFront 把浏览器窗口置前
+	BringToFront() error
+	// Close 关闭该驱动对应的浏览器窗口
+	Close() error
+}
+
+// ClickButtonJS 在页面里查找并点击排队入口按钮,返回按钮文本。
+// 英文部分不用 \b:该脚本会被嵌进 AppleScript 双引号字符串,反斜杠会被吃掉,
+// 因此用 ^(join|enter|proceed|continue)( |$) 做整词约束
+const ClickButtonJS = `(function(){var els=document.querySelectorAll('button,a,input[type=button],input[type=submit]');for(var i=0;i<els.length;i++){var t=(els[i].innerText||els[i].value||'').trim();if(/整理|進入|进入|加入|前往/i.test(t)||/^(join|enter|proceed|continue)( |$)/i.test(t)){els[i].click();return t;}}return '';})()`
+
+// GetContentJS 取 React 根节点(或 body)的可见文本
+const GetContentJS = `document.getElementById('root') ? document.getElementById('root').innerText : document.body.innerText`

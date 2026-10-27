@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>定点抢号</title>
+<style>
+  :root {
+    --accent: #4f46e5;
+    --accent-hover: #4338ca;
+    --bg: #f1f5f9;
+    --card: #ffffff;
+    --text: #1e293b;
+    --muted: #64748b;
+    --border: #e2e8f0;
+    --error: #dc2626;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; background: var(--bg); color: var(--text);
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
+    display: flex; justify-content: center; padding: 32px 16px;
+  }
+  .card {
+    background: var(--card); border-radius: 16px; width: 100%; max-width: 640px;
+    box-shadow: 0 4px 24px rgba(15, 23, 42, .08); padding: 28px 32px 24px;
+    height: fit-content;
+  }
+  header { display: flex; align-items: baseline; gap: 10px; margin-bottom: 4px; }
+  h1 { font-size: 22px; margin: 0; }
+  .status {
+    display: inline-block; font-size: 12px; padding: 2px 10px; border-radius: 999px;
+    background: #f1f5f9; color: var(--muted); margin-left: auto;
+  }
+  .status.running { background: #dcfce7; color: #15803d; }
+  form { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 16px; margin-top: 16px; }
+  .field { display: flex; flex-direction: column; gap: 5px; }
+  .field.full { grid-column: 1 / 3; }
+  .timepair { display: grid; grid-template-columns: 1.5fr 1fr 1fr 1fr 1fr 1fr; gap: 8px; }
+  .timepair select { padding: 0 22px 0 8px; background-position: right 6px center; }
+  label { font-size: 13px; color: var(--muted); font-weight: 500; }
+  input, select {
+    height: 38px; padding: 0 12px; border: 1px solid var(--border); border-radius: 8px;
+    font-size: 14px; color: var(--text); background: #fff; outline: none;
+    transition: border-color .15s, box-shadow .15s;
+  }
+  select {
+    appearance: none; -webkit-appearance: none; padding-right: 32px;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' fill='none' stroke='%2364748b' stroke-width='1.5' stroke-linecap='round'/></svg>");
+    background-repeat: no-repeat; background-position: right 12px center;
+  }
+  input:focus, select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(79, 70, 229, .12); }
+  .field.invalid input, .field.invalid select { border-color: var(--error); }
+  .msg { font-size: 12px; color: var(--error); min-height: 14px; }
+  .siteurl { font-size: 12px; color: var(--muted); word-break: break-all; margin-top: -2px; }
+  .field[hidden] { display: none; }
+  .buttons { grid-column: 1 / 3; display: flex; gap: 12px; margin-top: 4px; }
+  button {
+    padding: 10px 28px; font-size: 15px; border: none; border-radius: 8px;
+    cursor: pointer; font-weight: 600; transition: background .15s, opacity .15s;
+  }
+  #start { background: var(--accent); color: #fff; }
+  #start:hover:not(:disabled) { background: var(--accent-hover); }
+  #stop { background: #fee2e2; color: #b91c1c; }
+  #stop:hover:not(:disabled) { background: #fecaca; }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .hint { grid-column: 1 / 3; color: var(--muted); font-size: 12.5px; line-height: 1.6; }
+  #log {
+    margin-top: 18px; background: #0f172a; color: #4ade80; padding: 14px 16px;
+    border-radius: 10px; height: 300px; overflow-y: auto; white-space: pre-wrap;
+    font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12.5px; line-height: 1.55;
+  }
+</style>
+</head>
+<body>
+<div class="card">
+  <header>
+    <h1>定点抢号</h1>
+    <span class="status" id="status">空闲</span>
+  </header>
+  <form id="form" novalidate>
+    <div class="field full" data-name="site">
+      <label>购票网站</label>
+      <select name="site"></select>
+      <div class="siteurl" id="siteurl"></div>
+      <div class="msg"></div>
+    </div>
+    <div class="field full" data-name="url" id="urlfield" hidden>
+      <label>入口地址</label>
+      <input name="url" type="text" placeholder="粘贴完整的排队入口地址,https://..." autocomplete="off" spellcheck="false">
+      <div class="msg"></div>
+    </div>
+    <div class="field full" data-name="time">
+      <label>开售时间(香港时区)</label>
+      <div class="timepair">
+        <select name="year" aria-label="年"></select>
+        <select name="month" aria-label="月"></select>
+        <select name="day" aria-label="日"></select>
+        <select name="hour" aria-label="时"></select>
+        <select name="minute" aria-label="分"></select>
+        <select name="second" aria-label="秒"></select>
+      </div>
+      <div class="msg"></div>
+    </div>
+    <div class="field" data-name="driver">
+      <label>浏览器</label>
+      <select name="driver">
+        <option value="auto" selected>自动</option>
+        <option value="safari">Safari (macOS)</option>
+        <option value="cdp">Chrome / Edge / Chromium</option>
+      </select>
+      <div class="msg"></div>
+    </div>
+    <div class="field" data-name="sessions">
+      <label>会话数(各排一个号)</label>
+      <input name="sessions" type="number" value="3" min="1" max="10" step="1">
+      <div class="msg"></div>
+    </div>
+    <div class="field" data-name="lead">
+      <label>提前(秒)</label>
+      <input name="lead" type="number" value="10" min="0" step="1">
+      <div class="msg"></div>
+    </div>
+    <div class="field" data-name="interval">
+      <label>检查(毫秒)</label>
+      <input name="interval" type="number" value="500" min="100" step="100">
+      <div class="msg"></div>
+    </div>
+    <div class="field" data-name="timeout">
+      <label>超时(秒)</label>
+      <input name="timeout" type="number" value="15" min="1" step="1">
+      <div class="msg"></div>
+    </div>
+    <div class="buttons">
+      <button id="start" type="submit">开始</button>
+      <button id="stop" type="button" disabled>停止</button>
+    </div>
+    <div class="hint">
+      若页面出现人机验证,请在浏览器里手动完成一次,之后 Cookie 会记住。
+      会话数大于 1 时会打开多个相互独立的浏览器(需选 Chrome / Edge),各自排一个号;
+      新会话首次使用需各自手动过一次人机验证。
+    </div>
+  </form>
+  <pre id="log"></pre>
+</div>
+<script>
+const logEl = document.getElementById('log');
+const startBtn = document.getElementById('start');
+const stopBtn = document.getElementById('stop');
+const statusEl = document.getElementById('status');
+const form = document.getElementById('form');
+
+function setError(name, text) {
+  const field = form.querySelector(`.field[data-name="${name}"]`);
+  field.classList.toggle('invalid', !!text);
+  field.querySelector('.msg').textContent = text || '';
+}
+
+// 选中的时间按香港时区理解,这里把"现在的香港时间"换算成本地时间戳再比较
+function hkNowMs() {
+  return new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Hong_Kong' })).getTime();
+}
+
+// 年/月/日/时/分/秒六个下拉框,点开即滚轮选择;格式固定为 YYYY-MM-DD HH:MM:SS
+const timeSel = {};
+for (const n of ['year', 'month', 'day', 'hour', 'minute', 'second']) timeSel[n] = form.elements[n];
+const pad2 = n => String(n).padStart(2, '0');
+const range = (a, b) => { const r = []; for (let i = a; i <= b; i++) r.push(pad2(i)); return r; };
+function fillOptions(sel, values, unit) {
+  sel.innerHTML = values.map(v => `<option value="${v}">${v}${unit}</option>`).join('');
+}
+
+const hkNow = new Date(hkNowMs());
+const hkYear = hkNow.getFullYear();
+const years = []; for (let y = hkYear; y <= hkYear + 2; y++) years.push(String(y));
+fillOptions(timeSel.year, years, '年');
+fillOptions(timeSel.month, range(1, 12), '月');
+fillOptions(timeSel.hour, range(0, 23), '时');
+fillOptions(timeSel.minute, range(0, 59), '分');
+fillOptions(timeSel.second, range(0, 59), '秒');
+
+// 日期的可选天数跟随年月变化(含闰年),切换时尽量保留已选的日
+function refreshDays() {
+  const keep = Number(timeSel.day.value);
+  const last = new Date(Number(timeSel.year.value), Number(timeSel.month.value), 0).getDate();
+  fillOptions(timeSel.day, range(1, last), '日');
+  if (keep >= 1 && keep <= last) timeSel.day.value = pad2(keep);
+}
+timeSel.year.addEventListener('change', refreshDays);
+timeSel.month.addEventListener('change', refreshDays);
+
+// 默认选中香港今天、10:00:00
+timeSel.year.value = String(hkYear);
+timeSel.month.value = pad2(hkNow.getMonth() + 1);
+refreshDays();
+timeSel.day.value = pad2(hkNow.getDate());
+timeSel.hour.value = '10';
+timeSel.minute.value = '00';
+timeSel.second.value = '00';
+
+function combinedTime() {
+  const e = form.elements;
+  if (!e.year.value || !e.month.value || !e.day.value) return '';
+  return `${e.year.value}-${e.month.value}-${e.day.value} ${e.hour.value}:${e.minute.value}:${e.second.value}`;
+}
+
+function validate() {
+  let ok = true;
+  if (form.elements.site.value === 'custom') {
+    const u = form.elements.url.value.trim();
+    if (!/^https?:\/\/[^\s]+\.[^\s]+/.test(u)) {
+      setError('url', '请粘贴完整的 http/https 入口地址'); ok = false;
+    } else {
+      setError('url');
+    }
+  }
+  const timeVal = combinedTime();
+  if (!timeVal) {
+    setError('time', '请选择开售日期和时间'); ok = false;
+  } else if (new Date(timeVal.replace(' ', 'T')).getTime() <= hkNowMs()) {
+    setError('time', '开售时间已过,请选择将来的时间'); ok = false;
+  } else {
+    setError('time');
+  }
+  const rules = {
+    lead:     { min: 0,  label: '提前秒数' },
+    sessions: { min: 1,  max: 10, label: '会话数' },
+    interval: { min: 100, label: '检查间隔' },
+    timeout:  { min: 1,  label: '超时时间' },
+  };
+  for (const [name, r] of Object.entries(rules)) {
+    const raw = form.elements[name].value;
+    const n = Number(raw);
+    if (raw === '' || !Number.isInteger(n) || n < r.min || (r.max && n > r.max)) {
+      setError(name, r.max ? `${r.label}应为 ${r.min} 到 ${r.max} 的整数` : `${r.label}应为不小于 ${r.min} 的整数`); ok = false;
+    } else {
+      setError(name);
+    }
+  }
+  return ok;
+}
+form.addEventListener('input', (e) => {
+  if (e.target.closest('.field.invalid')) validate();
+});
+
+// 按钮状态以服务端为准:停止请求要等任务真正退出才返回,
+// 刷新页面后也能恢复正确的运行状态
+function applyState(st) {
+  startBtn.disabled = st.running || st.stopping;
+  stopBtn.disabled = !st.running || st.stopping;
+  statusEl.textContent = st.stopping ? '停止中' : (st.running ? '运行中' : '空闲');
+  statusEl.classList.toggle('running', st.running);
+}
+async function refreshState() {
+  const resp = await fetch('/api/state');
+  if (!resp.ok) return;
+  applyState(await resp.json());
+}
+refreshState();
+
+// 网站列表由后端提供(与 Go 注册表保持一致);预填上次输入的参数
+// ("YYYY-MM-DD HH:MM:SS" 拆回六个下拉框)
+Promise.all([
+  fetch('/api/sites').then(r => r.json()),
+  fetch('/api/settings').then(r => r.json()),
+]).then(([sites, s]) => {
+  const siteSel = form.elements.site;
+  const urlField = document.getElementById('urlfield');
+  siteSel.innerHTML = sites.map(o => `<option value="${o.key}">${o.name}</option>`).join('');
+  if (s.site) siteSel.value = s.site;
+  if (!siteSel.value) siteSel.selectedIndex = 0; // 记住的网站已下架时回到第一项
+  // 下拉框下方同步显示选中网站的入口地址;选「自定义」时改为露出粘贴输入框
+  const syncSite = () => {
+    const hit = sites.find(o => o.key === siteSel.value);
+    document.getElementById('siteurl').textContent = hit ? hit.url : '';
+    urlField.hidden = siteSel.value !== 'custom';
+  };
+  siteSel.addEventListener('change', syncSite);
+  syncSite();
+  if (s.url) form.elements.url.value = s.url;
+  const m = (s.time || '').match(/^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/);
+  if (m) {
+    timeSel.year.value = m[1];
+    timeSel.month.value = m[2];
+    refreshDays();
+    timeSel.day.value = m[3];
+    timeSel.hour.value = m[4];
+    timeSel.minute.value = m[5];
+    timeSel.second.value = m[6];
+  }
+  for (const k of ['lead', 'sessions', 'interval', 'timeout']) {
+    if (s[k] !== undefined) form.elements[k].value = s[k];
+  }
+  if (s.driver) form.elements.driver.value = s.driver;
+}).catch(() => {
+  logEl.textContent += '错误: 网站列表加载失败,请刷新页面重试\n';
+});
+
+const es = new EventSource('/api/logs');
+es.onmessage = (e) => {
+  logEl.textContent += e.data + '\n';
+  logEl.scrollTop = logEl.scrollHeight;
+  if (e.data.includes('任务结束')) refreshState();
+};
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  if (!validate()) return;
+  const data = new FormData(form);
+  data.set('time', combinedTime());
+  data.set('url', (data.get('url') || '').trim());
+  for (const n of ['year', 'month', 'day', 'hour', 'minute', 'second']) data.delete(n);
+  startBtn.disabled = true;
+  const resp = await fetch('/api/start', { method: 'POST', body: data });
+  if (!resp.ok) {
+    logEl.textContent += '错误: ' + await resp.text() + '\n';
+    refreshState();
+    return;
+  }
+  refreshState();
+});
+stopBtn.addEventListener('click', async () => {
+  stopBtn.disabled = true;
+  statusEl.textContent = '停止中';
+  await fetch('/api/stop', { method: 'POST' });
+  refreshState();
+});
+</script>
+</body>
+</html>
