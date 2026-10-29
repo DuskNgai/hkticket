@@ -13,8 +13,9 @@ var ntpServers = []string{"ntp.aliyun.com", "ntp.tencent.com", "ntp.ntsc.ac.cn",
 
 // Run 编排一次完整任务:校时 → 打开各会话标签页 → 等待到点 → 监视 → 命中处理。
 // ds 是每个会话一个的驱动实例(由 driver.NewN 创建),日志经 Logf 加时间戳,
-// logf 由调用方提供(命令行写 stdout,图形控制台广播到页面)
-func Run(ds []driver.Driver, cfg Config, logf func(string), stop <-chan struct{}) error {
+// logf 由调用方提供(命令行写 stdout,图形控制台广播到页面);
+// notify 转发人机验证状态给图形控制台,命令行传 nil
+func Run(ds []driver.Driver, cfg Config, logf func(string), notify func(VerifyEvent), stop <-chan struct{}) error {
 	// 命中排队位或出现需要人工处理的验证页时保留窗口;其余情况在结束时关闭
 	keepOpen := false
 	defer func() {
@@ -110,7 +111,7 @@ func Run(ds []driver.Driver, cfg Config, logf func(string), stop <-chan struct{}
 
 	Logf(logf, "触发!开始监视 %d 个会话(页面自行更新,仅出错才重载)...", len(ds))
 
-	hits, manual, err := Monitor(ds, cfg, target, timeout, now, logf, stop)
+	hits, manual, err := Monitor(ds, cfg, target, timeout, now, logf, notify, stop)
 	if hits > 0 {
 		keepOpen = true
 	}
@@ -120,7 +121,7 @@ func Run(ds []driver.Driver, cfg Config, logf func(string), stop <-chan struct{}
 	if hits == 0 {
 		if manual {
 			keepOpen = true
-			Logf(logf, "未检测到排队页面,但出现过人机验证,浏览器已保留,请继续在浏览器里操作")
+			Logf(logf, "未检测到排队页面,但出现过人机验证或登录页,浏览器已保留,请继续在浏览器里操作")
 		}
 		return fmt.Errorf("超时(%d 秒),未检测到排队页面", cfg.TimeoutSec)
 	}

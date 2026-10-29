@@ -16,6 +16,10 @@ type Site struct {
 // Sites 支持的网站,顺序即界面选项顺序
 var Sites = []Site{
 	{"hcfc", "HCFC 歌迷会", "https://vwr.hinscheung.com/?page_id=hins-1698981622&redirect_to=https%3A%2F%2Fhinscheung.com%2F"},
+	// uutix 没有单独的排队入口页:开售前就是演出详情页,按钮由「即將開售」在开售时刻
+	// 自动切换成「購買門票 / 選座購票」,点击后在同一标签页进入 /ticket 选票页。
+	// 换一场演出时把 pId 换成对应详情页的编号,或用「自定义」粘贴详情页地址。
+	{"uutix", "uutix(澳門演唱會)", "https://www.uutix.com/detail?pId=4007"},
 }
 
 // FindSite 按标识查找网站

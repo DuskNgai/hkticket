@@ -70,6 +70,14 @@
     border-radius: 10px; height: 300px; overflow-y: auto; white-space: pre-wrap;
     font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12.5px; line-height: 1.55;
   }
+  #verify {
+    display: none; margin-top: 14px; padding: 12px 14px; border-radius: 10px;
+    background: #fef2f2; border: 1px solid #fecaca; color: #b91c1c;
+    font-size: 14px; font-weight: 600; line-height: 1.55;
+    animation: verifyPulse 1.2s ease-in-out infinite;
+  }
+  #verify.on { display: block; }
+  @keyframes verifyPulse { 50% { box-shadow: 0 0 0 4px rgba(220, 38, 38, .16); } }
 </style>
 </head>
 <body>
@@ -78,6 +86,7 @@
     <h1>定点抢号</h1>
     <span class="status" id="status">空闲</span>
   </header>
+  <div id="verify" role="alert"></div>
   <form id="form" novalidate>
     <div class="field full" data-name="site">
       <label>购票网站</label>
@@ -126,19 +135,15 @@
       <input name="interval" type="number" value="500" min="100" step="100">
       <div class="msg"></div>
     </div>
-    <div class="field" data-name="timeout">
-      <label>超时(秒)</label>
-      <input name="timeout" type="number" value="15" min="1" step="1">
-      <div class="msg"></div>
-    </div>
     <div class="buttons">
       <button id="start" type="submit">开始</button>
       <button id="stop" type="button" disabled>停止</button>
     </div>
     <div class="hint">
-      若页面出现人机验证,请在浏览器里手动完成一次,之后 Cookie 会记住。
-      会话数大于 1 时会打开多个相互独立的浏览器(需选 Chrome / Edge),各自排一个号;
-      新会话首次使用需各自手动过一次人机验证。
+      1. 点击「开始」后，程序会自己打开浏览器、进到购票页，开售前开始盯着页面，按钮一出现就点。<br>
+      2. 顶部亮起红字表示有会话需要人机验证，切到那个窗口点一下「我不是机器人」就能继续。<br>
+      3. 会话数填 2 个以上可以同时排多个号，每个会话各开一个独立浏览器(仅支持 Chrome / Edge)，第一次用每个窗口都要单独过一次验证。<br>
+      4. 开售 10 秒内没排上队，任务会自动结束；期间出现过人机验证的话，窗口会保留给你自己接着操作。
     </div>
   </form>
   <pre id="log"></pre>
@@ -148,6 +153,7 @@ const logEl = document.getElementById('log');
 const startBtn = document.getElementById('start');
 const stopBtn = document.getElementById('stop');
 const statusEl = document.getElementById('status');
+const verifyEl = document.getElementById('verify');
 const form = document.getElementById('form');
 
 function setError(name, text) {
@@ -226,7 +232,6 @@ function validate() {
     lead:     { min: 0,  label: '提前秒数' },
     sessions: { min: 1,  max: 10, label: '会话数' },
     interval: { min: 100, label: '检查间隔' },
-    timeout:  { min: 1,  label: '超时时间' },
   };
   for (const [name, r] of Object.entries(rules)) {
     const raw = form.elements[name].value;
@@ -250,6 +255,19 @@ function applyState(st) {
   stopBtn.disabled = !st.running || st.stopping;
   statusEl.textContent = st.stopping ? '停止中' : (st.running ? '运行中' : '空闲');
   statusEl.classList.toggle('running', st.running);
+
+  // 人机验证只能在浏览器窗口里人工完成,控制台只做醒目提醒,不标具体会话
+  const verifying = st.verifying || [];
+  if (verifying.length > 0) {
+    verifyEl.textContent = '⚠ 有会话需要人机验证,请到对应的浏览器窗口点击「我不是机器人」' +
+      (st.running ? '' : ';窗口已保留,请继续操作');
+    verifyEl.classList.add('on');
+    document.title = '⚠ 需要人机验证 - 定点抢号';
+  } else {
+    verifyEl.classList.remove('on');
+    verifyEl.textContent = '';
+    document.title = '定点抢号';
+  }
 }
 async function refreshState() {
   const resp = await fetch('/api/state');
@@ -288,7 +306,7 @@ Promise.all([
     timeSel.minute.value = m[5];
     timeSel.second.value = m[6];
   }
-  for (const k of ['lead', 'sessions', 'interval', 'timeout']) {
+  for (const k of ['lead', 'sessions', 'interval']) {
     if (s[k] !== undefined) form.elements[k].value = s[k];
   }
   if (s.driver) form.elements.driver.value = s.driver;
@@ -297,11 +315,20 @@ Promise.all([
 });
 
 const es = new EventSource('/api/logs');
+es.onopen = refreshState; // 连接(含断线重连)建立时同步一次状态,避免漏掉提醒
 es.onmessage = (e) => {
   logEl.textContent += e.data + '\n';
   logEl.scrollTop = logEl.scrollHeight;
   if (e.data.includes('任务结束')) refreshState();
 };
+// 任务状态(含人机验证中的会话编号)由后端即时推送,不必等日志
+es.addEventListener('state', (e) => {
+  try {
+    applyState(JSON.parse(e.data));
+  } catch (_) {
+    // 解析失败时忽略,下一次状态事件或刷新页面会恢复
+  }
+});
 
 form.addEventListener('submit', async (e) => {
   e.preventDefault();

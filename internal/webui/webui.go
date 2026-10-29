@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os/exec"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -22,39 +24,78 @@ import (
 //go:embed index.html
 var indexHTML string
 
+// sseEvent 是推送到控制台页面的一条消息。name 为空表示普通日志
+// (EventSource 的 message 事件);"state" 表示任务状态(页面用具名事件接收)
+type sseEvent struct {
+	name string
+	data string
+}
+
+// statePayload 是 /api/state 与 state 事件共用的状态结构。
+// Verifying 列出当前停留在人机验证页的会话编号(从 1 开始)
+type statePayload struct {
+	Running   bool  `json:"running"`
+	Stopping  bool  `json:"stopping"`
+	Verifying []int `json:"verifying"`
+}
+
 type hub struct {
 	mu       sync.Mutex
 	running  bool
 	stopping bool
 	stop     chan struct{}
 	done     chan struct{}
-	subs     map[chan string]struct{}
+	verify   map[int]bool
+	subs     map[chan sseEvent]struct{}
 }
 
 func newHub() *hub {
-	return &hub{subs: map[chan string]struct{}{}}
+	return &hub{verify: map[int]bool{}, subs: map[chan sseEvent]struct{}{}}
 }
 
-func (h *hub) broadcast(s string) {
+func (h *hub) broadcast(s string) { h.send(sseEvent{data: s}) }
+
+func (h *hub) send(ev sseEvent) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for ch := range h.subs {
 		select {
-		case ch <- s:
+		case ch <- ev:
 		default: // 订阅者读取太慢时丢弃,不阻塞任务
 		}
 	}
 }
 
-func (h *hub) subscribe() chan string {
-	ch := make(chan string, 64)
+// stateLocked 组装当前状态,调用方必须已持有 h.mu
+func (h *hub) stateLocked() statePayload {
+	st := statePayload{Running: h.running, Stopping: h.stopping, Verifying: []int{}}
+	for s := range h.verify {
+		st.Verifying = append(st.Verifying, s)
+	}
+	sort.Ints(st.Verifying)
+	return st
+}
+
+// broadcastState 把人机验证等状态变化即时推给页面,由页面显示提醒
+func (h *hub) broadcastState() {
+	h.mu.Lock()
+	data, err := json.Marshal(h.stateLocked())
+	h.mu.Unlock()
+	if err != nil {
+		return
+	}
+	h.send(sseEvent{name: "state", data: string(data)})
+}
+
+func (h *hub) subscribe() chan sseEvent {
+	ch := make(chan sseEvent, 64)
 	h.mu.Lock()
 	h.subs[ch] = struct{}{}
 	h.mu.Unlock()
 	return ch
 }
 
-func (h *hub) unsubscribe(ch chan string) {
+func (h *hub) unsubscribe(ch chan sseEvent) {
 	h.mu.Lock()
 	delete(h.subs, ch)
 	h.mu.Unlock()
@@ -90,7 +131,9 @@ func (h *hub) handleStart(w http.ResponseWriter, r *http.Request) {
 	h.stopping = false
 	h.stop = stop
 	h.done = done
+	clear(h.verify) // 新任务从零开始收集人机验证状态
 	h.mu.Unlock()
+	h.broadcastState()
 	started := false
 	defer func() {
 		if started {
@@ -103,6 +146,7 @@ func (h *hub) handleStart(w http.ResponseWriter, r *http.Request) {
 		h.done = nil
 		h.mu.Unlock()
 		close(done)
+		h.broadcastState()
 	}()
 
 	// 前端用 FormData 提交(multipart);ParseForm 不解析 multipart 正文,
@@ -139,8 +183,19 @@ func (h *hub) handleStart(w http.ResponseWriter, r *http.Request) {
 	}
 
 	started = true
+	// 人机验证状态变化立即推送页面,让控制台醒目地标出需要处理的会话
+	notify := func(ev core.VerifyEvent) {
+		h.mu.Lock()
+		if ev.Active {
+			h.verify[ev.Session] = true
+		} else {
+			delete(h.verify, ev.Session)
+		}
+		h.mu.Unlock()
+		h.broadcastState()
+	}
 	go func() {
-		err := core.Run(ds, cfg, h.broadcast, stop)
+		err := core.Run(ds, cfg, h.broadcast, notify, stop)
 		if errors.Is(err, core.ErrStopped) {
 			core.Logf(h.broadcast, "任务已停止")
 		} else if err != nil {
@@ -156,6 +211,9 @@ func (h *hub) handleStart(w http.ResponseWriter, r *http.Request) {
 		h.done = nil
 		h.mu.Unlock()
 		close(done)
+		// 任务结束时保留仍在进行的验证状态:对应浏览器窗口会保留,
+		// 页面据此继续提示用户操作;新任务开始或停止时才清空
+		h.broadcastState()
 		core.Logf(h.broadcast, "任务结束")
 	}()
 	fmt.Fprintln(w, "started")
@@ -175,9 +233,15 @@ func (h *hub) handleStop(w http.ResponseWriter, r *http.Request) {
 	}
 	done := h.done
 	h.mu.Unlock()
+	h.broadcastState()
 	// 等到任务真正退出,避免紧接着的「开始」读到旧的运行状态
 	if done != nil {
 		<-done
+		// 停止会关闭本次打开的浏览器窗口,验证提醒随之失效
+		h.mu.Lock()
+		clear(h.verify)
+		h.mu.Unlock()
+		h.broadcastState()
 	}
 	fmt.Fprintln(w, "stopped")
 }
@@ -185,18 +249,30 @@ func (h *hub) handleStop(w http.ResponseWriter, r *http.Request) {
 // handleState 返回当前任务状态,页面刷新后据此恢复按钮状态
 func (h *hub) handleState(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
-	state := struct {
-		Running  bool `json:"running"`
-		Stopping bool `json:"stopping"`
-	}{h.running, h.stopping}
+	data, err := json.Marshal(h.stateLocked())
 	h.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
-	data, err := json.Marshal(state)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	fmt.Fprintln(w, string(data))
+}
+
+// writeSSEEvent 把一条消息按 SSE 格式写入并立即推送。
+// 具名事件(目前是 state)用 event 字段,普通日志走默认的 message 事件;
+// SSE 的 data 行不允许包含原始换行,日志逐行发送
+func writeSSEEvent(w io.Writer, flusher http.Flusher, ev sseEvent) {
+	if ev.name != "" {
+		fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.name, ev.data)
+		flusher.Flush()
+		return
+	}
+	for _, line := range strings.Split(ev.data, "\n") {
+		fmt.Fprintf(w, "data: %s\n", line)
+	}
+	fmt.Fprint(w, "\n")
+	flusher.Flush()
 }
 
 func (h *hub) handleLogs(w http.ResponseWriter, r *http.Request) {
@@ -215,13 +291,8 @@ func (h *hub) handleLogs(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-r.Context().Done():
 			return
-		case s := <-ch:
-			// SSE 的 data 行不允许包含原始换行,逐行发送
-			for _, line := range strings.Split(s, "\n") {
-				fmt.Fprintf(w, "data: %s\n", line)
-			}
-			fmt.Fprint(w, "\n")
-			flusher.Flush()
+		case ev := <-ch:
+			writeSSEEvent(w, flusher, ev)
 		}
 	}
 }

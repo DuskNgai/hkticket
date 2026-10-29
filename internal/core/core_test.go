@@ -2,6 +2,9 @@ package core
 
 import (
 	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -25,11 +28,26 @@ func TestCheckHit(t *testing.T) {
 		{"等候室英文", "The event has not started yet", false},
 		{"语言选择页(短内容)", "繁\n简\nEN", false},
 		{"官网菜单页(长内容)", "HI01\n\nhins shop02\n\nHins auction03\n\nh.gallery04\n\nHINSCOGRAPHY\n\n" + strings.Repeat("票", 60), false},
+		{"uutix 开售前详情页", "澳門倫敦人榮譽呈獻：張敬軒 x 澳門中樂團\n10/28 15:00 (UTC+8) 開搶\n剩 00 天 00 時 15 分 15 秒\n即將開售", false},
+		{"uutix 选票页", "節目場次\n票價種類\n選擇座位\n數量\n合計\n購買", true},
+		{"uutix 排队弹窗", "當前排隊人數太多啦，請在倒計時結束後繼續", true},
+		{"uutix EdgeOne 拦截页", "當前購票人數過多\n請稍後重試\n刷 新", false},
 	}
 	for _, c := range cases {
 		if got := CheckHit(c.content); got != c.want {
 			t.Errorf("%s: CheckHit = %v, 期望 %v", c.name, got, c.want)
 		}
+	}
+}
+
+func TestIsLoadingPage(t *testing.T) {
+	for _, s := range []string{"", "繁 | EN 正在加載...", "正在加载中", "Loading, please wait"} {
+		if !IsLoadingPage(s) {
+			t.Errorf("%q 应判定为加载中", s)
+		}
+	}
+	if IsLoadingPage("You are now in line") {
+		t.Error("排队页不应判定为加载中")
 	}
 }
 
@@ -46,6 +64,21 @@ func TestNeedsVerification(t *testing.T) {
 	}
 	if NeedsVerification("活动尚未开始,请稍候") {
 		t.Error("等候室内容不应判定为人机验证页")
+	}
+}
+
+func TestNeedsLogin(t *testing.T) {
+	hits := []string{
+		"登入uutix\nuutix已採用電郵方式登入\n電郵地址\n密碼",
+		"登录uutix\n请使用电话号码登录",
+	}
+	for _, s := range hits {
+		if !NeedsLogin(s) {
+			t.Errorf("%q 应判定为登录页", s)
+		}
+	}
+	if NeedsLogin("You are now in line") {
+		t.Error("排队页不应判定为登录页")
 	}
 }
 
@@ -103,13 +136,16 @@ func TestExtractQueueNumber(t *testing.T) {
 
 func TestButtonHintRE(t *testing.T) {
 	hits := []string{"整理页面", "進入", "进入队列", "加入等候", "前往", "enter now", "Join the queue",
-		"重新整理", "Refresh", "please refresh at that time", "Reload"}
+		"重新整理", "Refresh", "please refresh at that time", "Reload",
+		"購買門票", "選座購票", "特惠選座", "立即購買"}
 	for _, s := range hits {
 		if !ButtonHintRE.MatchString(s) {
 			t.Errorf("%q 应命中入口按钮特征", s)
 		}
 	}
-	misses := []string{"Entertainment", "some entertainment news", ""}
+	// 开售前的按钮和倒计时文案不能被当成入口按钮
+	misses := []string{"Entertainment", "some entertainment news", "",
+		"即將開售", "即將開售，請耐心等待", "10/28 15:00 (UTC+8) 開搶"}
 	for _, s := range misses {
 		if ButtonHintRE.MatchString(s) {
 			t.Errorf("%q 不应命中入口按钮特征", s)
@@ -169,10 +205,31 @@ func TestParseTargetTime(t *testing.T) {
 	}
 }
 
-// CLICK_BUTTON_JS 会被嵌进 AppleScript 双引号字符串,反斜杠会被 AppleScript 吃掉
+// CLICK_BUTTON_JS 会被嵌进 AppleScript 双引号字符串,反斜杠会被 AppleScript 吃掉,
+// 双引号会提前结束字符串
 func TestClickButtonJSNoBackslash(t *testing.T) {
 	if strings.Contains(driver.ClickButtonJS, `\`) {
 		t.Error("ClickButtonJS 不允许包含反斜杠")
+	}
+	if strings.Contains(driver.ClickButtonJS, `"`) {
+		t.Error("ClickButtonJS 不允许包含双引号")
+	}
+}
+
+// ClickButtonJS 必须能被 JS 引擎解析。单引号字符串里再嵌单引号会把字符串截断,
+// 整段脚本抛 SyntaxError,而驱动会把该错误当过渡态吞掉,表现为「点击从未发生」。
+// 有 node 时直接做语法检查(没有则跳过,不影响其他平台)
+func TestClickButtonJSSyntax(t *testing.T) {
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("未找到 node,跳过 JS 语法检查")
+	}
+	path := filepath.Join(t.TempDir(), "click.js")
+	if err := os.WriteFile(path, []byte(driver.ClickButtonJS), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(node, "--check", path).CombinedOutput(); err != nil {
+		t.Fatalf("ClickButtonJS 不是合法 JS: %v\n%s", err, out)
 	}
 }
 
@@ -220,10 +277,10 @@ func (f *fakeDriver) Reload() error               { f.reloads++; return nil }
 func (f *fakeDriver) BringToFront() error         { return nil }
 func (f *fakeDriver) Close() error                { return nil }
 
-func newTestMonitor(f *fakeDriver) (int, bool, error) {
+func newTestMonitor(f *fakeDriver, notify func(VerifyEvent)) (int, bool, error) {
 	target := time.Now()
 	return Monitor([]driver.Driver{f}, Config{IntervalMs: 100, TimeoutSec: 60, Sessions: 1},
-		target, target.Add(time.Minute), time.Now, func(string) {}, f.stop)
+		target, target.Add(time.Minute), time.Now, func(string) {}, notify, f.stop)
 }
 
 // 等候室的「重新整理」点一次只重查一次状态,必须每轮都点
@@ -235,7 +292,7 @@ func TestMonitorRepeatsRefreshClick(t *testing.T) {
 		stop:      stop,
 		stopAfter: 4,
 	}
-	_, _, err := newTestMonitor(d)
+	_, _, err := newTestMonitor(d, nil)
 	if !errors.Is(err, ErrStopped) {
 		t.Fatalf("应因停止信号结束,得到 %v", err)
 	}
@@ -253,7 +310,7 @@ func TestMonitorClicksEntryOnce(t *testing.T) {
 		stop:      stop,
 		stopAfter: 4,
 	}
-	_, _, err := newTestMonitor(d)
+	_, _, err := newTestMonitor(d, nil)
 	if !errors.Is(err, ErrStopped) {
 		t.Fatalf("应因停止信号结束,得到 %v", err)
 	}
@@ -273,7 +330,7 @@ func TestMonitorRefreshThenHit(t *testing.T) {
 		clickText: "重新整理",
 		stop:      make(chan struct{}),
 	}
-	hits, _, err := newTestMonitor(d)
+	hits, _, err := newTestMonitor(d, nil)
 	if err != nil {
 		t.Fatalf("不应报错: %v", err)
 	}
@@ -300,7 +357,7 @@ func TestMonitorReloadsAfterTarget(t *testing.T) {
 		return clock
 	}
 	_, _, err := Monitor([]driver.Driver{d}, Config{IntervalMs: 100, TimeoutSec: 60, Sessions: 1},
-		target, target.Add(time.Minute), now, func(string) {}, stop)
+		target, target.Add(time.Minute), now, func(string) {}, nil, stop)
 	if !errors.Is(err, ErrStopped) {
 		t.Fatalf("应因停止信号结束,得到 %v", err)
 	}
@@ -325,11 +382,129 @@ func TestMonitorNoReloadAfterRefreshButton(t *testing.T) {
 		return clock
 	}
 	_, _, err := Monitor([]driver.Driver{d}, Config{IntervalMs: 100, TimeoutSec: 60, Sessions: 1},
-		target, target.Add(time.Minute), now, func(string) {}, stop)
+		target, target.Add(time.Minute), now, func(string) {}, nil, stop)
 	if !errors.Is(err, ErrStopped) {
 		t.Fatalf("应因停止信号结束,得到 %v", err)
 	}
 	if d.reloads != 0 {
 		t.Errorf("PleaseQ 页面不应主动重载,实际重载 %d 次", d.reloads)
+	}
+}
+
+// 人机验证出现和消失都要通知界面,供控制台显示和撤掉提醒
+func TestMonitorNotifiesVerifyState(t *testing.T) {
+	const verifyPage = "Human verification, please click the checkbox"
+	var events []VerifyEvent
+	d := &fakeDriver{contents: []string{
+		verifyPage,
+		verifyPage,
+		"You are now in line! Number of Users Ahead of You: 5",
+	}}
+	target := time.Now()
+	hits, manual, err := Monitor([]driver.Driver{d},
+		Config{IntervalMs: 100, TimeoutSec: 60, Sessions: 1},
+		target, target.Add(time.Minute), time.Now, func(string) {},
+		func(ev VerifyEvent) { events = append(events, ev) }, make(chan struct{}))
+	if err != nil {
+		t.Fatalf("不应报错: %v", err)
+	}
+	if hits != 1 || !manual {
+		t.Fatalf("应命中 1 个会话并标记出现过人机验证,得到 hits=%d manual=%v", hits, manual)
+	}
+	want := []VerifyEvent{{Session: 1, Active: true}, {Session: 1, Active: false}}
+	if len(events) != len(want) {
+		t.Fatalf("验证状态事件应为 %v,得到 %v", want, events)
+	}
+	for i := range want {
+		if events[i] != want[i] {
+			t.Errorf("第 %d 个事件应为 %v,得到 %v", i+1, want[i], events[i])
+		}
+	}
+}
+
+// 单页应用重载后需要几秒渲染,「正在加載」期间不能主动重载,
+// 否则每秒一次的重载会把加载不断打断,页面永远出不来(2026-10-28 实测)
+func TestMonitorDoesNotReloadWhileLoading(t *testing.T) {
+	stop := make(chan struct{})
+	d := &fakeDriver{
+		contents: []string{
+			"正在加載...",
+			"正在加載...",
+			"購買門票",
+			"節目場次\n票價種類\n數量\n合計\n購買",
+		},
+		clickText: "購買門票",
+		stop:      stop,
+	}
+	target := time.Now()
+	clock := target.Add(-time.Second)
+	now := func() time.Time {
+		clock = clock.Add(300 * time.Millisecond)
+		return clock
+	}
+	hits, _, err := Monitor([]driver.Driver{d}, Config{IntervalMs: 100, TimeoutSec: 60, Sessions: 1},
+		target, target.Add(time.Minute), now, func(string) {}, nil, stop)
+	if err != nil {
+		t.Fatalf("页面加载完并命中后应正常结束,得到 %v", err)
+	}
+	if hits != 1 {
+		t.Errorf("页面加载完成后应命中,得到 %d", hits)
+	}
+	if d.clicks != 1 {
+		t.Errorf("应点击 1 次购票按钮,实际 %d 次", d.clicks)
+	}
+	if d.reloads != 0 {
+		t.Errorf("加载中不应重载,实际重载 %d 次", d.reloads)
+	}
+}
+
+// 未登录时点击入口会跳到 uutix 登录页:不点击、不重载,
+// 但必须标记人工处理,让 Run 保留窗口等用户登录
+func TestMonitorLoginKeepsWindow(t *testing.T) {
+	const loginPage = "登入uutix\nuutix已採用電郵方式登入\n電郵地址\n密碼\n登入"
+	stop := make(chan struct{})
+	d := &fakeDriver{
+		contents:  []string{loginPage},
+		clickText: "購買門票",
+		stop:      stop,
+		stopAfter: 3,
+	}
+	hits, manual, err := newTestMonitor(d, nil)
+	if !errors.Is(err, ErrStopped) {
+		t.Fatalf("应因停止信号结束,得到 %v", err)
+	}
+	if hits != 0 || !manual {
+		t.Errorf("登录页不应命中,但应标记需要人工处理,得到 hits=%d manual=%v", hits, manual)
+	}
+	if d.clicks != 0 {
+		t.Errorf("登录页不应点击按钮,实际点击 %d 次", d.clicks)
+	}
+	if d.reloads != 0 {
+		t.Errorf("登录页不应重载,实际重载 %d 次", d.reloads)
+	}
+}
+
+// 验证页持续存在时只通知一次,避免界面反复刷新
+func TestMonitorVerifyNotifyOnce(t *testing.T) {
+	stop := make(chan struct{})
+	d := &fakeDriver{
+		contents:  []string{"Human verification, please click the checkbox"},
+		stop:      stop,
+		stopAfter: 4,
+	}
+	var events []VerifyEvent
+	target := time.Now()
+	_, manual, err := Monitor([]driver.Driver{d},
+		Config{IntervalMs: 100, TimeoutSec: 60, Sessions: 1},
+		target, target.Add(time.Minute), time.Now, func(string) {},
+		func(ev VerifyEvent) { events = append(events, ev) }, stop)
+	if !errors.Is(err, ErrStopped) {
+		t.Fatalf("应因停止信号结束,得到 %v", err)
+	}
+	if !manual {
+		t.Error("应标记出现过人机验证")
+	}
+	if len(events) != 1 || events[0] != (VerifyEvent{Session: 1, Active: true}) {
+		t.Errorf("验证页持续存在时只应通知一次,得到 %v", events)
 	}
 }

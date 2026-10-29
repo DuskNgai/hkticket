@@ -12,11 +12,19 @@ import (
 // ErrStopped 表示任务被停止信号中断,调用方应把它当作正常停止处理
 var ErrStopped = errors.New("任务已被停止")
 
+// VerifyEvent 是某个会话人机验证状态的变化,供图形控制台显示提醒。
+// Session 从 1 开始编号;Active 为 true 表示页面出现人机验证,
+// false 表示验证页已消失(通常是用户已完成验证或已进入排队页)
+type VerifyEvent struct {
+	Session int
+	Active  bool
+}
+
 // 默认参数,命令行与图形控制台共用
 const (
 	DefaultLeadSec    = 10
 	DefaultIntervalMs = 500
-	DefaultTimeoutSec = 15
+	DefaultTimeoutSec = 10
 	DefaultSessions   = 3
 	// MaxSessions 会话数上限;每个会话是一个完整浏览器进程,过多会拖垮机器
 	MaxSessions = 10
@@ -69,13 +77,14 @@ const (
 
 // Monitor 监视各会话的标签页直到出现排队页或超时,返回命中的会话数,
 // 以及是否出现过需要人工处理的人机验证页。
+// notify 在会话的人机验证状态变化时调用(可为 nil),供界面显示或撤掉提醒。
 // 每个会话一个独立浏览器实例(标签页固定 1 个),命中后继续监视其余会话,
 // 全部命中或超时才结束。
 //
 // 策略(来自 2026-09-12 实测):PleaseQ 页面是自动更新的单页应用,
 // 等候室会自行切换成入口按钮,持续刷新只会中断应用启动,还会抹掉入口按钮。
 // 因此:轮询内容、按钮出现即点击,只有页面出错才恢复性重载。
-func Monitor(ds []driver.Driver, cfg Config, target, timeout time.Time, now func() time.Time, logf func(string), stop <-chan struct{}) (hits int, manual bool, err error) {
+func Monitor(ds []driver.Driver, cfg Config, target, timeout time.Time, now func() time.Time, logf func(string), notify func(VerifyEvent), stop <-chan struct{}) (hits int, manual bool, err error) {
 	attempt := 0
 	var lastS1 string
 	lastS1Set := false
@@ -84,9 +93,16 @@ func Monitor(ds []driver.Driver, cfg Config, target, timeout time.Time, now func
 	lastReload := map[int]time.Time{} // 每个会话上次恢复性重载的时刻
 	verifyNotified := map[int]bool{}  // 已提示过人机验证的会话
 	verifyCount := map[int]int{}      // 每个会话出现人机验证的次数
+	loginLogged := map[int]bool{}     // 已提示过「需要登录」的会话
 	refreshLogged := map[int]bool{}   // 已提示过「重新整理」按钮的会话
 	refreshSeen := map[int]bool{}     // 出现过「重新整理」按钮的会话,属于 PleaseQ 类页面
 	manual = false                    // 是否出现过需要人工处理的验证页
+
+	notifyVerify := func(ev VerifyEvent) {
+		if notify != nil {
+			notify(ev)
+		}
+	}
 
 	for now().Before(timeout) {
 		if err := checkStop(stop); err != nil {
@@ -130,6 +146,7 @@ func Monitor(ds []driver.Driver, cfg Config, target, timeout time.Time, now func
 				if !verifyNotified[s] {
 					verifyNotified[s] = true
 					verifyCount[s]++
+					notifyVerify(VerifyEvent{Session: s + 1, Active: true})
 					Logf(logf, "[S%d] 页面要求人机验证,请在对应浏览器窗口点击「我不是机器人」", s+1)
 					if err := d.BringToFront(); err != nil {
 						Logf(logf, "[S%d] 置前窗口失败: %v", s+1, err)
@@ -140,8 +157,25 @@ func Monitor(ds []driver.Driver, cfg Config, target, timeout time.Time, now func
 				}
 				continue
 			}
-			// 验证页消失后重置,下次再出现时重新提示
-			verifyNotified[s] = false
+			// 验证页消失后重置,下次再出现时重新提示,并通知界面撤掉该会话的提醒
+			if verifyNotified[s] {
+				verifyNotified[s] = false
+				notifyVerify(VerifyEvent{Session: s + 1, Active: false})
+			}
+
+			// uutix 未登录时点「購買門票」会跳到登录页。登录只能人工完成,
+			// 这里不点击不重载,但要标记出现过人工处理,让 Run 保留窗口
+			if NeedsLogin(content) {
+				manual = true
+				if !loginLogged[s] {
+					loginLogged[s] = true
+					Logf(logf, "[S%d] 页面要求登入 uutix,请在浏览器里完成登录(登录后会回到选票页)", s+1)
+					if err := d.BringToFront(); err != nil {
+						Logf(logf, "[S%d] 置前窗口失败: %v", s+1, err)
+					}
+				}
+				continue
+			}
 
 			// 入口按钮一出现就点击;本轮内容是在点击前读取的,跳过命中检查
 			if !entered[s] && ButtonHintRE.MatchString(content) {
@@ -185,9 +219,10 @@ func Monitor(ds []driver.Driver, cfg Config, target, timeout time.Time, now func
 			// 开售后兜底:没有出现「重新整理」按钮的页面(非 PleaseQ)通常不会自己更新,
 			// 到点后必须主动重载才能刷出购票入口,第一个到点的轮询就重载,之后每秒重试;
 			// PleaseQ 由上面的连续点击推进,重载会打断它,所以用 refreshSeen 排除。
-			// 空白内容通常是重载后的导航过渡,跳过这里、交给下面错误页重载的 5 秒退避,
-			// 否则每秒一次的重载会不断打断页面加载
-			if !entered[s] && !refreshSeen[s] && content != "" && !now().Before(target) &&
+			// 空白或「正在加載」都是重载后的过渡态:单页应用要几秒才能渲染,
+			// 每秒一次的重载会把加载不断打断、页面永远出不来(uutix 实测),
+			// 因此加载中一律跳过,交给下面错误页重载的 5 秒退避兜底
+			if !entered[s] && !refreshSeen[s] && !IsLoadingPage(content) && !now().Before(target) &&
 				time.Since(lastReload[s]) >= proactiveReloadBackoff {
 				lastReload[s] = time.Now()
 				if err := d.Reload(); err != nil {

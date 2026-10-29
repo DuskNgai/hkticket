@@ -1,6 +1,7 @@
 package webui
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -101,10 +102,49 @@ func TestHandleState(t *testing.T) {
 	rr := httptest.NewRecorder()
 	h.handleState(rr, httptest.NewRequest(http.MethodGet, "/api/state", nil))
 
-	if got, want := strings.TrimSpace(rr.Body.String()), `{"running":true,"stopping":true}`; got != want {
+	if got, want := strings.TrimSpace(rr.Body.String()), `{"running":true,"stopping":true,"verifying":[]}`; got != want {
 		t.Errorf("状态 JSON = %s, 期望 %s", got, want)
 	}
 	if ct := rr.Header().Get("Content-Type"); ct != "application/json" {
 		t.Errorf("Content-Type = %q", ct)
 	}
 }
+
+// 验证中的会话编号随时间状态返回,并保持升序,供页面显示提醒
+func TestHandleStateVerifying(t *testing.T) {
+	h := newHub()
+	h.running = true
+	h.stopping = false
+	h.verify = map[int]bool{3: true, 1: true, 2: true}
+
+	rr := httptest.NewRecorder()
+	h.handleState(rr, httptest.NewRequest(http.MethodGet, "/api/state", nil))
+
+	if got, want := strings.TrimSpace(rr.Body.String()), `{"running":true,"stopping":false,"verifying":[1,2,3]}`; got != want {
+		t.Errorf("状态 JSON = %s, 期望 %s", got, want)
+	}
+}
+
+// 状态事件与普通日志都按 SSE 规范输出,每条消息推送一次
+func TestWriteSSEEvent(t *testing.T) {
+	var buf bytes.Buffer
+	fl := &fakeFlusher{}
+	writeSSEEvent(&buf, fl, sseEvent{name: "state", data: "{\"running\":true}"})
+	want := "event: state\ndata: {\"running\":true}\n\n"
+	if got := buf.String(); got != want {
+		t.Errorf("具名事件 = %q, 期望 %q", got, want)
+	}
+	buf.Reset()
+	writeSSEEvent(&buf, fl, sseEvent{data: "第一行\n第二行"})
+	want = "data: 第一行\ndata: 第二行\n\n"
+	if got := buf.String(); got != want {
+		t.Errorf("日志事件 = %q, 期望 %q", got, want)
+	}
+	if fl.n != 2 {
+		t.Errorf("每条消息都应推送一次,实际 %d 次", fl.n)
+	}
+}
+
+type fakeFlusher struct{ n int }
+
+func (f *fakeFlusher) Flush() { f.n++ }

@@ -50,7 +50,7 @@ func main() {
 	}
 
 	fs := flag.NewFlagSet("hkticket", flag.ExitOnError)
-	site := fs.String("site", defSite, "目标网站:hcfc(HCFC 歌迷会)/ custom(自定义,配合 --url)")
+	site := fs.String("site", defSite, "目标网站:hcfc(HCFC 歌迷会)/ uutix(uutix 澳門演唱會)/ custom(自定义,配合 --url)")
 	urlStr := fs.String("url", saved.URL, "自定义入口地址(仅 --site custom 时使用;上次输入会自动填入)")
 	timeStr := fs.String("time", saved.Time, "目标时间 YYYY-MM-DD HH:MM:SS(香港时区;上次输入会自动填入)")
 	lead := fs.Int("lead", defLead, "提前开始监视的秒数")
@@ -101,7 +101,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := core.Run(ds, cfg, func(s string) { fmt.Println(s) }, nil); err != nil {
+	if err := core.Run(ds, cfg, func(s string) { fmt.Println(s) }, nil, nil); err != nil {
 		fmt.Fprintln(os.Stderr, "错误:", err)
 		os.Exit(1)
 	}
