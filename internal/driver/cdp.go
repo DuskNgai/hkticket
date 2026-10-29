@@ -34,14 +34,15 @@ func NewCDP(profileDir string) (*CDPDriver, error) {
 	if !found {
 		return nil, fmt.Errorf("未找到系统浏览器,请安装 Chrome 或 Edge")
 	}
-	// 上一次运行留下的浏览器仍在运行时,新的 chrome.exe 会把命令转交给已有进程
-	// 然后退出,DevTools 端口永远不会出现。用 PID 文件在各平台统一提前判断
-	if err := checkProfileOwner(profileDir); err != nil {
+	// 上一次任务异常结束时浏览器进程可能还在,新启动的 msedge 会把命令转交给它
+	// 并立刻退出,DevTools 端口永远不会出现。先按配置目录里的调试端口找到并关掉它,
+	// 用户不必自己去关残留的浏览器窗口;关不掉的由 cleanupStaleBrowser 报错
+	if err := cleanupStaleBrowser(profileDir); err != nil {
 		return nil, err
 	}
-	// 上一次任务异常结束时浏览器进程可能还在,新启动的 msedge 会把命令转交给它
-	// 并立刻退出,DevTools 端口永远不会出现。先按配置目录里的调试端口找到并关闭它
-	if err := cleanupStaleBrowser(profileDir); err != nil {
+	// 调试端口确认关闭后,再用 PID 文件核对一次:进程已退出就清掉残留记录;
+	// 仍然存活说明它不是本工具记录的那个浏览器(例如 PID 被复用),宁可报错也不误杀
+	if err := checkProfileOwner(profileDir); err != nil {
 		return nil, err
 	}
 	// macOS/Linux 上再检查 Chrome 自己的单实例锁,覆盖不是本工具启动的浏览器
@@ -253,11 +254,30 @@ func cleanupStaleBrowser(profileDir string) error {
 	_ = b.Close()
 	for i := 0; i < 50; i++ {
 		if _, ok := devToolsWS(port); !ok {
+			// 调试端口先关闭、进程稍后才退出。等 PID 文件里的进程一并退出,
+			// 避免紧接着的 checkProfileOwner 把正在退出的浏览器当成仍在运行
+			waitProfileProcessGone(profileDir)
 			return nil
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 	return fmt.Errorf("会话目录 %s 仍被浏览器占用(调试端口 %d),请手动关闭残留的浏览器窗口后重试", profileDir, port)
+}
+
+// waitProfileProcessGone 等 PID 文件记录的浏览器进程退出,最多等 3 秒。
+// 进程早已退出或没有 PID 文件时立即返回
+func waitProfileProcessGone(profileDir string) {
+	data, err := os.ReadFile(pidFilePath(profileDir))
+	if err != nil {
+		return
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 0 {
+		return
+	}
+	for i := 0; i < 30 && processAlive(pid); i++ {
+		time.Sleep(100 * time.Millisecond)
+	}
 }
 
 var errNoLockFile = errors.New("无残留锁文件")
